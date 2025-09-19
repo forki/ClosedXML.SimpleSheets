@@ -1,19 +1,15 @@
-﻿namespace ClosedXML.SimpleSheets
+namespace ClosedXML.SimpleSheets
 
 open System
 open System.IO
-
-open ClosedXML
 open ClosedXML.Excel
 open ClosedXML.Excel.Drawings
 
 type XLImage(content: byte[], format: XLPictureFormat) =
-    member self.content = content
-    member self.format = format
+    member __.content = content
+    member __.format = format
 
     new (content: byte[]) = XLImage(content, XLPictureFormat.Png)
-
-
 
 type FieldMap<'T> =
     {
@@ -126,7 +122,7 @@ type FieldMap<'T> =
 
         member self.italic(italic: 'T -> bool) =
             let transformer (row: 'T) (cell: IXLCell) =
-                cell.Style.Font.Bold <- italic row
+                cell.Style.Font.Italic <- italic row
                 cell
             { self with CellTransformers = List.append self.CellTransformers [transformer] }
 
@@ -162,6 +158,7 @@ type FieldMap<'T> =
 
         member self.dateFormat(format: string) =
             let transformer (row: 'T) (cell: IXLCell) =
+                // cell.DataType <- XLDataType.DateTime
                 cell.Style.DateFormat.Format <- format
                 cell
 
@@ -278,18 +275,22 @@ type Excel() =
     static member field<'T>(map: 'T -> DateTime) = FieldMap<'T>.create(fun row cell -> cell.SetValue(map row))
     static member field<'T>(map: 'T -> bool) = FieldMap<'T>.create(fun row cell -> cell.SetValue(map row))
     static member field<'T>(map: 'T -> double) = FieldMap<'T>.create(fun row cell -> cell.SetValue(map row))
-    static member field<'T>(map: 'T -> int option) = FieldMap<'T>.create(fun row cell -> 
-        let value= Option.toNullable (map row)
-        cell.SetValue(value))
-    static member field<'T>(map: 'T -> DateTime option) = FieldMap<'T>.create(fun row cell -> 
-        let value = Option.toNullable (map row)
-        cell.SetValue(value))
-    static member field<'T>(map: 'T -> bool option) = FieldMap<'T>.create(fun row cell -> 
-        let value = Option.toNullable (map row) 
-        cell.SetValue(XLCellValue.FromObject(value)))
-    static member field<'T>(map: 'T -> double option) = FieldMap<'T>.create(fun row cell -> 
-        let value = Option.toNullable (map row)
-        cell.SetValue(value))
+    static member field<'T>(map: 'T -> int option) = FieldMap<'T>.create(fun row cell ->
+        match map row with
+        | None -> cell
+        | Some number -> cell.SetValue(number))
+    static member field<'T>(map: 'T -> DateTime option) = FieldMap<'T>.create(fun row cell ->
+        match map row with
+        | None -> cell
+        | Some date -> cell.SetValue(date))
+    static member field<'T>(map: 'T -> bool option) = FieldMap<'T>.create(fun row cell ->
+        match map row with
+        | None -> cell
+        | Some bool -> cell.SetValue(bool))
+    static member field<'T>(map: 'T -> double option) = FieldMap<'T>.create(fun row cell ->
+        match map row with
+        | None -> cell
+        | Some number -> cell.SetValue(number))
     static member field<'T>(map: 'T -> string option) = FieldMap<'T>.create(fun row cell ->
         match map row with
         | None -> cell
@@ -341,9 +342,7 @@ type Excel() =
     static member field<'T>(map: 'T -> int64 option) = FieldMap<'T>.create(fun row cell ->
         match map row with
         | None -> cell
-        | Some value -> 
-            let valueAsDouble = Convert.ToDouble(value)
-            cell.SetValue(valueAsDouble)
+        | Some value -> cell.SetValue(value)
     )
 
     static member field<'T>(map: 'T -> Guid) = FieldMap<'T>.create(fun row cell ->
@@ -390,7 +389,11 @@ type Excel() =
         if headersAvailable then
             for (headerIndex, headerTransformers) in List.indexed headerTransformerGroups do
                 let activeHeaderCell = sheet.Row(1).Cell(headerIndex + 1)
-                for header in headerTransformers do ignore (header activeHeaderCell)
+                for header in headerTransformers do
+                    ignore (header activeHeaderCell)
+
+        let columnsToAdjust = System.Collections.Generic.HashSet<int>()
+        let rowsToAdjust = System.Collections.Generic.HashSet<int>()
 
         for (rowIndex, row) in Seq.indexed data do
             let startRowIndex = if headersAvailable then 2 else 1
@@ -400,26 +403,29 @@ type Excel() =
                 for transformer in field.CellTransformers do
                     ignore (transformer row activeCell)
 
-                if field.AdjustToContents then
-                    let currentColumn = activeCell.WorksheetColumn()
-                    currentColumn.AdjustToContents() |> ignore
-                    activeRow.AdjustToContents() |> ignore
-
                 match field.ColumnWidth with
                 | Some givenWidth ->
-                    let currentColumn = activeCell.WorksheetColumn()
-                    currentColumn.Width <- givenWidth
+                    activeCell.WorksheetColumn().Width <- givenWidth
+                | None when field.AdjustToContents ->
+                    columnsToAdjust.Add(fieldIndex + 1) |> ignore
                 | None -> ()
 
                 match field.RowHeight with
                 | Some givenHeightFn ->
                     match givenHeightFn row with
-                    | Some givenHeight ->
-                        activeRow.Height <- givenHeight
-                    | None ->
-                        ()
-                | None ->
-                    ()
+                    | Some givenHeight -> activeRow.Height <- givenHeight
+                    | None when field.AdjustToContents ->
+                        rowsToAdjust.Add(rowIndex + startRowIndex) |> ignore
+                    | None -> ()
+                | None when field.AdjustToContents ->
+                    rowsToAdjust.Add(rowIndex + startRowIndex) |> ignore
+                | None -> ()
+
+        for colIndex in columnsToAdjust do
+            sheet.Column(colIndex).AdjustToContents() |> ignore
+
+        for rowIndex in rowsToAdjust do
+            sheet.Row(rowIndex).AdjustToContents() |> ignore
 
     static member workbookToBytes(workbook: XLWorkbook) =
         use memoryStream = new MemoryStream()
@@ -428,42 +434,28 @@ type Excel() =
 
     static member createFrom(name: string, data: seq<'T>, fields: FieldMap<'T> list) : byte[] =
         use workbook = new XLWorkbook()
-        let sheet = workbook.AddWorksheet(name)
+        let sheet = workbook.AddWorksheet name
         Excel.populate(sheet, data, fields)
         Excel.workbookToBytes(workbook)
+
+    static member createFromAndReuseWorkbook(name: string, data: seq<'T>, fields: FieldMap<'T> list) : XLWorkbook =
+        let workbook = new XLWorkbook()
+        Excel.addWorksheet(workbook, name, data, fields)
+
+    static member addWorksheet(workbook: XLWorkbook, name: string, data: seq<'T>, fields: FieldMap<'T> list) : XLWorkbook =
+        let sheet = workbook.AddWorksheet name
+        Excel.populate(sheet, data, fields)
+        workbook
 
     static member createFrom(workbook: XLWorkbook) =
         use memoryStream = new MemoryStream()
         workbook.SaveAs(memoryStream)
         memoryStream.ToArray()
 
-    static member createFrom(data: seq<'T>, fields: FieldMap<'T> list) : byte[] =
-        Excel.createFrom("Sheet1", data, fields)
+    static member transpose(workbook: XLWorkbook) =
+        let worksheet = workbook.Worksheet(1)
+        let transposedRange = worksheet.Range(worksheet.FirstCellUsed(), worksheet.LastCellUsed())
+        transposedRange.Transpose(XLTransposeOptions.MoveCells) |> ignore
+        workbook
 
     static member contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"
-
-[<AutoOpen>]
-module Extensions =
-    type System.Collections.Generic.IEnumerable<'T> with
-        member inline data.excelField(map: 'T -> string) : FieldMap<'T> = Excel.field(map)
-        member inline data.excelField(map: 'T -> string option) : FieldMap<'T> = Excel.field(map)
-        member inline data.excelField(map: 'T -> bool) : FieldMap<'T> = Excel.field(map)
-        member inline data.excelField(map: 'T -> bool option) : FieldMap<'T> = Excel.field(map)
-        member inline data.excelField(map: 'T -> int) : FieldMap<'T> = Excel.field(map)
-        member inline data.excelField(map: 'T -> int option) : FieldMap<'T> = Excel.field(map)
-        member inline data.excelField(map: 'T -> double) : FieldMap<'T> = Excel.field(map)
-        member inline data.excelField(map: 'T -> double option) : FieldMap<'T> = Excel.field(map)
-        member inline data.excelField(map: 'T -> decimal) : FieldMap<'T> = Excel.field(map)
-        member inline data.excelField(map: 'T -> decimal option) : FieldMap<'T> = Excel.field(map)
-        member inline data.excelField(map: 'T -> DateTime) : FieldMap<'T> = Excel.field(map)
-        member inline data.excelField(map: 'T -> DateTime option) : FieldMap<'T> = Excel.field(map)
-        member inline data.excelField(map: 'T -> DateTimeOffset) : FieldMap<'T> = Excel.field(map)
-        member inline data.excelField(map: 'T -> DateTimeOffset option) : FieldMap<'T> = Excel.field(map)
-        member inline data.excelField(map: 'T -> int64) : FieldMap<'T> = Excel.field(map)
-        member inline data.excelField(map: 'T -> int64 option) : FieldMap<'T> = Excel.field(map)
-        member inline data.excelField(map: 'T -> Guid) : FieldMap<'T> = Excel.field(map)
-        member inline data.excelField(map: 'T -> Guid option) : FieldMap<'T> = Excel.field(map)
-        member inline data.excelField(map: 'T -> Uri) : FieldMap<'T> = Excel.field(map)
-        member inline data.excelField(map: 'T -> Uri option) : FieldMap<'T> = Excel.field(map)
-        member inline data.excelField(map: 'T -> XLImage) : FieldMap<'T> = Excel.field(map)
-        member inline data.excelField(map: 'T -> XLImage option) : FieldMap<'T> = Excel.field(map)
